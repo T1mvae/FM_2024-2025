@@ -1,0 +1,442 @@
+# Forecasting Methods Project Group K
+
+## Title: Forecasting Apple Stock Prices Using Box-Jenkins Methodology
+
+### Authors: Artem Khomytskyi (20221686), Timofii Kuzmenko (20221690), Davyd Azarov (20221688)  
+### Date: June 7, 2025
+
+**Description**: This script applies the Box-Jenkins methodology to forecast Apple Inc. (AAPL) adjusted closing prices (2015–2024) using ARIMA and other time series models. The process includes data preprocessing, stationarity checks, transformations, model estimation, diagnostics, and forecast evaluation.
+
+**Introduction**: This analysis applies the Box-Jenkins methodology to forecast Apple Inc. (AAPL) adjusted closing prices from January 1, 2015, to December 31, 2024, using daily data. The goal is to develop robust time series models to predict future stock prices, leveraging ARIMA, ETS, and benchmark methods. The dataset, sourced from Yahoo Finance, comprises approximately 2,517 observations, adjusted for dividends and splits. This study evaluates model performance using metrics such as MAE, RMSE, MAPE, MASE, and Theil’s U, with a focus on achieving stationarity and accurate forecasts.
+
+### Load Packages
+
+```r
+library(quantmod)    # For retrieving financial data
+library(ggplot2)     # For visualizations
+library(tseries)     # For stationarity tests (ADF, KPSS)
+library(urca)       # For advanced unit root tests
+library(forecast)    # For ARIMA, ETS, and forecasting tools
+library(Metrics)     # For evaluation metrics (MAE, RMSE, etc.)
+library(lmtest)      # For coefficient significance tests
+library(gridExtra)   # For arranging multiple plots
+library(reshape2)    # For reshaping data for visualization
+```
+
+### Step 1: Load and Prepare Data
+
+Load AAPL adjusted closing prices from Yahoo Finance (2015-01-01 to 2024-12-31). Data consists of ~2,517 daily observations, adjusted for dividends and splits
+
+```r
+getSymbols("AAPL", src = "yahoo", from = "2015-01-01", to = "2024-12-31")
+apple_prices <- AAPL[, "AAPL.Adjusted"]
+```
+
+### Step 2: Stabilize Variance
+
+Initial exploration showed an upward trend and volatility, indicating non-stationarity. Apply logarithmic and Box-Cox transformations to stabilize variance
+
+```r
+log_prices <- log(apple_prices)  # Log transformation for interpretability
+lambda <- BoxCox.lambda(apple_prices)  # Estimate Box-Cox parameter
+log_boxcox_prices <- BoxCox(apple_prices, lambda = lambda)  # Box-Cox transformation
+cat("Estimated Box-Cox lambda:", round(lambda, 4), "\n")
+```
+
+Report: Lambda ≈ 0.0498, suggesting log transformation is a good approximation
+
+```r
+if (abs(lambda) < 0.15) {
+cat("✅ Log-transform is a good approximation of Box-Cox (λ ≈ 0)\n")
+} else {
+cat("⚠️ Log-transform may not be optimal — consider using Box-Cox explicitly\n")
+}
+```
+
+Visualize original and transformed series
+
+```r
+p1 <- autoplot(apple_prices) + ggtitle("1. AAPL Adjusted Prices (2015–2024)") + ylab("Price")
+p2 <- autoplot(log_prices) + ggtitle("2. Log Prices") + ylab("Log(Price)")
+p3 <- autoplot(log_boxcox_prices) + ggtitle(paste0("3. Box-Cox (λ = ", round(lambda, 2), ")")) + ylab("Box-Cox(Price)")
+grid.arrange(p1, p2, p3, ncol = 1)
+```
+
+Visual inspection of the raw AAPL adjusted closing prices revealed increasing variance over time, indicative of heteroskedasticity. The Box-Cox transformation, with an estimated lambda of approximately 0.0498, was applied to stabilize variance, as values close to zero suggest a logarithmic transformation is appropriate.
+
+### Step 3: Check Stationarity
+
+ADF and KPSS tests confirm non-stationarity of raw series
+
+```r
+adf_result <- adf.test(apple_prices)
+kpss_test <- ur.kpss(apple_prices)
+cat("ADF Test p-value:", adf_result$p.value, "\n")
+if (adf_result$p.value < 0.05) {
+cat("✔️ ADF: Stationarity confirmed (reject H0)\n")
+} else {
+cat("❌ ADF: Non-stationary (fail to reject H0)\n")
+}
+kpss_summary <- summary(kpss_test)
+kpss_stat <- kpss_summary@teststat
+kpss_cv <- kpss_summary@cval[1, "5pct"]
+if (![is.na](http://is.na/)(kpss_cv) && kpss_stat > kpss_cv) {
+cat("❌ KPSS: Non-stationary (reject H0)\n")
+} else {
+cat("✔️ KPSS: Stationarity confirmed (fail to reject H0)\n")
+}
+```
+
+The Augmented Dickey-Fuller (ADF) test yielded a p-value of 0.99, failing to reject the null hypothesis of a unit root, indicating non-stationarity. The KPSS test statistic of 5.36 exceeded the 5% critical value of 0.463, rejecting the null hypothesis of stationarity, further confirming the need for differencing to achieve stationarity.
+
+Difference log prices to achieve stationarity
+
+```r
+diff_log_prices <- diff(log_prices)
+log_prices <- na.omit(diff_log_prices)  # Remove NA from differencing
+```
+
+Visualize differenced series and ACF/PACF to confirm stationarity
+
+```r
+diff_log_prices_clean <- na.omit(diff_log_prices)
+par(mfrow = c(1, 2))
+acf(diff_log_prices_clean, main = "5. ACF of Differenced Log Prices")
+pacf(diff_log_prices_clean, main = "6. PACF of Differenced Log Prices")
+par(mfrow = c(1, 1))
+```
+
+### Step 4: Trend Analysis
+
+Fit a linear trend to log prices to confirm significant trend
+
+Significant trend detected (p-value < 0.05, R² = 0.94)
+
+```r
+time_index <- 1:length(log_prices)
+trend_model <- lm(coredata(log_prices) ~ time_index)
+cat("R-squared (trend model):", summary(trend_model)$r.squared, "\n")
+if (summary(trend_model)$coefficients[2,4] < 0.05) {
+cat("✔️ Significant trend detected.\n")
+} else {
+cat("⚠️ No statistically significant trend.\n")
+}
+plot(log_prices, main = "4. Log Prices with Linear Trend", ylab = "Log(Price)")
+abline(trend_model, col = "red", lwd = 2)
+```
+
+STL decomposition to identify trend and seasonality
+
+STL shows a dominant trend with minor seasonal fluctuations (frequency = 252 trading days)
+
+```r
+log_prices_ts <- ts(as.numeric(log_prices), frequency = 252)
+stl_decomp <- stl(log_prices_ts, s.window = "periodic")
+autoplot(stl_decomp) + ggtitle("7. STL Decomposition of Log Prices")
+```
+
+The STL decomposition indicated a strong linear trend in the log-transformed series, with a minor seasonal component at a frequency of 252 trading days (approximately one year). The weak seasonality suggests that non-seasonal ARIMA and ETS models may be sufficient for capturing the primary dynamics of the series.
+
+### Step 5: Identify and Estimate Models
+
+Split data into training and test sets (last 12 days for testing)
+
+```r
+h <- 12
+n <- length(log_prices)
+train <- log_prices[1:(n - h)]
+train_ts <- ts(as.numeric(train), frequency = 252)
+test <- log_prices[(n - h + 1):n]
+test_ts <- ts(as.numeric(test), frequency = 252)
+```
+
+Estimate ARIMA models
+
+Models include Auto ARIMA, Manual ARIMA(1,1,2), ARIMA(2,1,0), ARIMA(0,1,3), SARIMA, and Box-Cox ARIMA
+
+```r
+model_train_auto <- auto.arima(train)  # Auto ARIMA selects ARIMA(1,0,0)
+model_train_manual <- arima(train, order = c(1,1,2))  # Manual based on ACF/PACF
+model_train_alt1 <- arima(train, order = c(2,1,0))   # Alternative ARIMA(2,1,0)
+model_train_alt2 <- arima(train, order = c(0,1,3))   # Alternative ARIMA(0,1,3)
+model_train_sarima <- auto.arima(train, seasonal = TRUE)  # Seasonal ARIMA
+model_train_boxcox <- auto.arima(BoxCox(train, lambda = lambda))  # Box-Cox ARIMA
+```
+
+The ACF and PACF plots of the differenced log prices showed significant spikes at lags 1 and 2, suggesting an ARIMA(1,1,2) model. Alternative models, ARIMA(2,1,0) and ARIMA(0,1,3), were tested to explore different autoregressive and moving average structures. The auto.arima function selected ARIMA(1,0,0) based on AIC, but manual inspection favored models with differencing for stationarity.
+
+Estimate ETS and benchmark models
+
+ETS (AAN, ANN, Auto), STL+ETS, Naive, Drift, Holt, Holt-Winters, and Mean models included
+
+```r
+ets_model <- ets(train)  # Auto ETS
+ets_aan <- ets(train, model = "AAN")  # Additive trend, no seasonality
+ets_ann <- ets(train, model = "ANN")  # No trend or seasonality
+stl_fit <- stlm(train_ts, s.window = "periodic", method = "ets")  # STL + ETS
+naive_model <- naive(train, h = 12)  # Naive forecast
+drift_model <- rwf(train, drift = TRUE, h = 12)  # Drift forecast
+holt_model <- holt(train, h = 12)  # Holt’s linear trend
+hw_model <- HoltWinters(ts(train, frequency = 252))  # Holt-Winters
+mean_model <- meanf(train_ts, h = 12)  # Mean forecast
+```
+
+Display Holt-Winters parameters
+
+```r
+cat("\n--- Holt-Winters model parameters ---\n")
+cat("Alpha (level)   =", round(hw_model$alpha, 4), "\n")
+if (!is.null(hw_model$beta)) {
+cat("Beta (trend)   =", round(hw_model$beta, 4), "\n")
+}
+if (!is.null(hw_model$gamma)) {
+cat("Gamma (seasonal)=", round(hw_model$gamma, 4), "\n")
+}
+```
+
+### Step 6: Diagnostic Checks
+
+Function to inspect ARIMA model residuals (Ljung-Box, Shapiro-Wilk, ACF/PACF, Q-Q plots)
+
+```r
+inspect_model <- function(model, name = "Unnamed Model") {
+  cat("\n\n==========", name, "==========\n")
+  print(summary(model))
+  if ("Arima" %in% class(model)) {
+    print(coeftest(model))  # Coefficient significance
+  }
+  checkresiduals(model)  # Plot residuals and diagnostics
+  res <- na.omit(residuals(model))
+  T_len <- length(res)
+  K_lag <- floor(sqrt(T_len))
+  cat("Using Ljung-Box with lag =", K_lag, "\n")
+  cat("Ljung-Box test:\n")
+  print(Box.test(res, type = "Ljung-Box", lag = K_lag))  # Test for autocorrelation
+  cat("Shapiro-Wilk test:\n")
+  print(shapiro.test(residuals(model)))  # Test for normality
+  qqnorm(residuals(model)); qqline(residuals(model), col = "blue")
+  acf(residuals(model), main = paste("ACF of Residuals:", name))
+  pacf(residuals(model), main = paste("PACF of Residuals:", name))
+}
+```
+
+Inspect ARIMA-based models
+
+```r
+inspect_model(model_train_auto, "Auto ARIMA (train)")
+inspect_model(model_train_manual, "Manual ARIMA(1,1,2) (train)")
+inspect_model(model_train_alt1, "ARIMA(2,1,0) (train)")
+inspect_model(model_train_alt2, "ARIMA(0,1,3) (train)")
+inspect_model(model_train_sarima, "SARIMA (train)")
+inspect_model(model_train_boxcox, "Box-Cox ARIMA (train)")
+```
+
+Function to check residuals for non-ARIMA models
+
+```r
+check_model <- function(model, name) {
+	cat("\n\n==========", name, "==========\n")
+	checkresiduals(model)
+	res <- residuals(model)
+	res <- na.omit(as.numeric(res))
+	T_len <- length(res)
+	K_lag <- floor(sqrt(T_len))
+	cat("Using Ljung-Box with lag =", K_lag, "\n")
+	cat("Ljung-Box test:\n")
+	print(Box.test(res, type = "Ljung-Box", lag = K_lag))
+	cat("Shapiro-Wilk test:\n")
+	print(shapiro.test(res))
+	qqnorm(res, main = paste("Q-Q Plot:", name))
+	qqline(res, col = "blue")
+	acf(res, main = paste("ACF of Residuals:", name))
+	pacf(res, main = paste("PACF of Residuals:", name))
+}
+```
+
+Inspect non-ARIMA models
+
+```r
+check_model(naive_model, "Naive")
+check_model(drift_model, "Drift")
+check_model(mean_model, "Mean Forecast")
+check_model(holt_model, "Holt")
+check_model(hw_model, "Holt-Winters")
+```
+
+Residual diagnostics for ARIMA models indicated no significant autocorrelation (Ljung-Box p-values > 0.05), but Shapiro-Wilk tests suggested non-normality (p-values < 0.05) for most models. This non-normality is common in financial time series due to volatility clustering, but the lack of autocorrelation supports the adequacy of the models for forecasting.
+
+### Step 7: Forecasting
+
+Generate 12-step-ahead forecasts for all models
+
+```r
+fc_auto <- forecast(model_train_auto, h = h)
+fc_manual <- forecast(model_train_manual, h = h)
+fc_alt1 <- forecast(model_train_alt1, h = h)
+fc_alt2 <- forecast(model_train_alt2, h = h)
+fc_boxcox <- forecast(model_train_boxcox, h = h)
+fc_sarima <- forecast(model_train_sarima, h = h)
+fc_ets <- forecast(ets_model, h = 12)
+fc_aan <- forecast(ets_aan, h = 12)
+fc_ann <- forecast(ets_ann, h = 12)
+fc_stl <- forecast(stl_fit, h = 12)
+fc_naive <- forecast(naive_model)
+fc_drift <- forecast(drift_model)
+fc_holt <- forecast(holt_model)
+fc_hw <- forecast(hw_model, h = 12)
+fc_mean <- forecast(mean_model)
+```
+
+Back-transform Box-Cox forecasts
+
+```r
+fc_boxcox$mean <- InvBoxCox(fc_boxcox$mean, lambda = lambda)
+```
+
+Visualize forecasts
+
+```r
+autoplot(fc_auto) + ggtitle("Auto ARIMA") + ylab("Log Price")
+autoplot(fc_manual) + ggtitle("Manual ARIMA(1,1,2)") + ylab("Log Price")
+autoplot(fc_sarima) + ggtitle("SARIMA") + ylab("Log Price")
+autoplot(fc_boxcox) + ggtitle("Box-Cox ARIMA (manual)") + ylab("Price")
+autoplot(fc_alt1) + ggtitle("ARIMA(2,1,0)") + ylab("Log Price")
+autoplot(fc_alt2) + ggtitle("ARIMA(0,1,3)") + ylab("Log Price")
+autoplot(fc_ets) + ggtitle("ETS (auto)") + ylab("Log Price")
+autoplot(fc_aan) + ggtitle("ETS (AAN)") + ylab("Log Price")
+autoplot(fc_ann) + ggtitle("ETS (ANN)") + ylab("Log Price")
+autoplot(fc_stl) + ggtitle("STL + ETS") + ylab("Log Price")
+autoplot(fc_naive) + ggtitle("Naive Forecast") + ylab("Log Price")
+autoplot(fc_drift) + ggtitle("Drift Forecast") + ylab("Log Price")
+autoplot(fc_holt) + ggtitle("Holt Forecast") + ylab("Log Price")
+autoplot(fc_hw) + ggtitle("Holt-Winters Forecast") + ylab("Log Price")
+autoplot(fc_mean) + ggtitle("Mean Forecast") + ylab("Log Price")
+```
+
+### Step 8: Evaluate Forecast Accuracy
+
+Define Theil's U metric
+
+```r
+theil_u <- function(actual, forecast) {
+	actual <- as.numeric(actual)
+	forecast <- as.numeric(forecast)
+	numerator <- sqrt(mean((actual - forecast)^2))
+	denominator <- sqrt(mean(forecast^2)) + sqrt(mean(actual^2))
+	return(numerator / denominator)
+}
+```
+
+Utility function for computing evaluation metrics
+
+```r
+eval_metrics <- function(actual, predicted) {
+	actual <- as.numeric(actual)
+	predicted <- as.numeric(predicted)
+	c(
+		MAE = mae(actual, predicted),
+		RMSE = rmse(actual, predicted),
+		MAPE = mape(actual, predicted),
+		MASE = mase(actual, predicted),
+		TheilU = theil_u(actual, predicted)
+	)
+}
+```
+
+Compute metrics for all models
+
+Holt model had lowest MAE (0.00881), ARIMA(2,1,0) had lowest MAPE (0.7701) and Theil's U (0.8273)
+
+```r
+metrics_auto <- eval_metrics(test_ts, fc_auto$mean)
+metrics_manual <- eval_metrics(test_ts, fc_manual$mean)
+metrics_alt1 <- eval_metrics(test_ts, fc_alt1$mean)
+metrics_alt2 <- eval_metrics(test_ts, fc_alt2$mean)
+metrics_boxcox <- eval_metrics(test_ts, fc_boxcox$mean)
+metrics_sarima <- eval_metrics(test_ts, fc_sarima$mean)
+metrics_ets <- eval_metrics(test_ts, fc_ets$mean)
+metrics_aan <- eval_metrics(test_ts, fc_aan$mean)
+metrics_ann <- eval_metrics(test_ts, fc_ann$mean)
+metrics_stl <- eval_metrics(test_ts, fc_stl$mean)
+metrics_naive <- eval_metrics(test_ts, fc_naive$mean)
+metrics_drift <- eval_metrics(test_ts, fc_drift$mean)
+metrics_holt <- eval_metrics(test_ts, fc_holt$mean)
+metrics_hw <- eval_metrics(test_ts, fc_hw$mean)
+metrics_mean <- eval_metrics(test_ts, fc_mean$mean)
+```
+
+Collect metrics in a data frame
+
+```r
+accuracy_df <- data.frame(
+	Model = c("Auto ARIMA", "Manual ARIMA(1,1,2)", "ARIMA(2,1,0)", "ARIMA(0,1,3)",
+	"Box-Cox ARIMA (manual)", "SARIMA", "ETS (Auto)", "ETS (AAN)", "ETS (ANN)",
+	"STL + ETS", "Naive", "Drift", "Holt", "Holt-Winters", "Mean Forecast"),
+	rbind(metrics_auto, metrics_manual, metrics_alt1, metrics_alt2,
+	metrics_boxcox, metrics_sarima, metrics_ets, metrics_aan,
+	metrics_ann, metrics_stl, metrics_naive, metrics_drift,
+	metrics_holt, metrics_hw, metrics_mean)
+)
+print(accuracy_df)
+```
+
+The Holt model achieved the lowest MAE (0.00881), indicating superior point forecast accuracy, while ARIMA(2,1,0) had the lowest MAPE (0.7701) and Theil’s U (0.8273), suggesting better relative accuracy and scaling. Naive and Mean models performed poorly, with higher errors across all metrics, underscoring the importance of modeling trend and dynamics in financial time series.
+
+Visualize model accuracy comparison
+
+```r
+accuracy_long <- melt(accuracy_df, id.vars = "Model", variable.name = "Metric", value.name = "Value")
+ggplot(accuracy_long, aes(x = reorder(Model, Value), y = Value, fill = Model)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  coord_flip() +
+  labs(title = "12. Model Accuracy Comparison", x = "Model", y = " cross-validation (tsCV)")
+       
+errors_arima_cv <- tsCV(log_prices, forecastfunction = function(y, h) {
+  forecast(Arima(y, order = c(1,1,2)), h = h)
+}, h = 1)
+errors_ets_cv <- tsCV(log_prices, forecastfunction = function(y, h) {
+  forecast(ets(y, model = "AAN"), h = h)
+}, h = 1)
+mae_arima_cv <- mean(abs(errors_arima_cv), na.rm = TRUE)
+rmse_arima_cv <- sqrt(mean(errors_arima_cv^2, na.rm = TRUE))
+mae_ets_cv <- mean(abs(errors_ets_cv), na.rm = TRUE)
+rmse_ets_cv <- sqrt(mean(errors_ets_cv^2, na.rm = TRUE))
+cat("\n\n--- Rolling Forecast (tsCV) Errors ---\n")
+cat("ARIMA MAE:", round(mae_arima_cv, 4), ", RMSE:", round(rmse_arima_cv, 4), "\n")
+cat("ETS MAE:", round(mae_ets_cv, 4), ", RMSE:", round(rmse_ets_cv, 4), "\n")
+```
+
+Time series cross-validation (tsCV) was performed with a one-step-ahead forecast horizon to assess model robustness. The ARIMA(1,1,2) and ETS (AAN) models showed comparable performance, with MAE values of approximately 0.0127 and RMSE values of approximately 0.0181, indicating reliable forecasting ability over short horizons.
+
+Report: Cross-validation shows comparable performance (MAE ≈ 0.0127, RMSE ≈ 0.0181)
+
+### Step 10: Save Results
+
+Save all objects for reproducibility
+
+```r
+save(
+  apple_prices, log_prices, log_boxcox_prices, time_index, log_prices_ts, diff_log_prices_clean,
+  adf_result, kpss_test, kpss_summary, kpss_stat, kpss_cvals, kpss_cv,
+  trend_model, lambda,
+  train, test_ts, train_ts,
+  model_train_auto, model_train_manual, model_train_alt1, model_train_alt2, model_train_boxcox, model_train_sarima,
+  ets_model, ets_aan, ets_ann, stl_fit,
+  naive_model, drift_model, holt_model, hw_model, mean_model,
+  fc_auto, fc_manual, fc_alt1, fc_alt2, fc_boxcox, fc_sarima, fc_ets, fc_aan, fc_ann, fc_stl,
+  fc_naive, fc_drift, fc_holt, fc_hw, fc_mean,
+  metrics_auto, metrics_manual, metrics_alt1, metrics_alt2, metrics_boxcox, metrics_sarima,
+  metrics_ets, metrics_aan, metrics_ann, metrics_stl, metrics_naive, metrics_drift, metrics_holt,
+  metrics_hw, metrics_mean, accuracy_df, accuracy_long,
+  stl_decomp,
+  errors_arima_cv, errors_ets_cv, mae_arima_cv, rmse_arima_cv, mae_ets_cv, rmse_ets_cv,
+  file = "data_group_K.RData"
+)
+```
+
+### Conclusion
+
+The analysis successfully applied the Box-Jenkins methodology to forecast AAPL stock prices, demonstrating the effectiveness of ARIMA and Holt models in capturing the series’ trend and dynamics. The superior performance of the Holt model (MAE = 0.00881) and ARIMA(2,1,0) (MAPE = 0.7701, Theil’s U = 0.8273) highlights the importance of modeling both trend and short-term dependencies in financial time series. The weak seasonality observed suggests that non-seasonal models are sufficient for short-term forecasts, though incorporating volatility models could improve long-term predictions.
+
+Future work: Refine SARIMA seasonal components and explore hybrid models
